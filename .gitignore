@@ -1,0 +1,18 @@
+# Logs et fichiers temporaires
+*.log
+*.tmp
+
+# Fichiers système spécifiques
+.DS_Store
+Thumbs.db
+
+# Configs réseau ou clés (si tu en stockes localement)
+credentials.conf
+*.key
+ue1_bridge/credentials.h
+
+
+CONTEXT.md
+
+# Claude Code
+.claude/
