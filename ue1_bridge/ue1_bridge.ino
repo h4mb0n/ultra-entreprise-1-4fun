@@ -1,4 +1,5 @@
 #include <ESP8266WiFi.h>
+#include <SoftwareSerial.h>
 
 #include "credentials.h"
 
@@ -8,12 +9,18 @@
 // UART0 swap mode: RX=GPIO13(D7), TX=GPIO15(D8) — matches YL-97 wiring
 #define TX_PIN        15
 
+// After Serial.swap(), GPIO1/GPIO3 are free — CH340 USB chip still wired on GPIO1.
+// SoftwareSerial here → debug output visible on /dev/ttyUSB0, no extra hardware.
+SoftwareSerial dbg(3, 1); // RX=GPIO3, TX=GPIO1
+#define DBG dbg
+
 WiFiServer server(TCP_PORT);
 WiFiClient client;
 
 // Generate RS-232 BREAK: hold TX LOW for ~250 ms.
 // Serial.end() releases the UART so we can drive the pin directly.
 void sendBreak() {
+  DBG.println("[dbg] sendBreak");
   Serial.flush();
   Serial.end();
   pinMode(TX_PIN, OUTPUT);
@@ -24,7 +31,7 @@ void sendBreak() {
 }
 
 void setup() {
-  // Debug on USB (GPIO1/GPIO3) until WiFi is up
+  // Boot messages on USB UART0 until swap
   Serial.begin(115200);
   Serial.println("\n[ue1-bridge] booting...");
 
@@ -48,6 +55,10 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   Serial.swap();
 
+  // GPIO1/GPIO3 now free — init SoftwareSerial debug on USB CH340
+  dbg.begin(9600);
+  DBG.println("[dbg] ready, TCP listening on port 23");
+
   server.begin();
   server.setNoDelay(true);
 }
@@ -55,10 +66,38 @@ void setup() {
 // Escape protocol: 0x7E 0x42 ('~B') → BREAK
 // 0x7E 0x7E                         → literal 0x7E
 static bool escPending = false;
+static bool wasConnected = false;
+
+static uint32_t rxBytes = 0;   // UART → TCP
+static uint32_t txBytes = 0;   // TCP  → UART
+static unsigned long lastBeat = 0;
 
 void loop() {
+  // Heartbeat toutes les 5 s sur le debug serial
+  unsigned long now = millis();
+  if (now - lastBeat >= 5000) {
+    lastBeat = now;
+    bool connected = client && client.connected();
+    DBG.print("[dbg] alive | client=");
+    DBG.print(connected ? "yes" : "no");
+    DBG.print(" | uart_rx=");
+    DBG.print(rxBytes);
+    DBG.print(" | uart_tx=");
+    DBG.println(txBytes);
+  }
+
   if (!client || !client.connected()) {
-    client = server.accept();
+    if (wasConnected) {
+      DBG.println("[dbg] client disconnected");
+      wasConnected = false;
+    }
+    WiFiClient newClient = server.accept();
+    if (newClient) {
+      DBG.print("[dbg] client connected from ");
+      DBG.println(newClient.remoteIP());
+      client = newClient;
+      wasConnected = true;
+    }
     escPending = false;
     return;
   }
@@ -73,9 +112,11 @@ void loop() {
         sendBreak();
       } else if (b == 0x7E) { // ~~ → literal ~
         Serial.write(0x7E);
+        txBytes++;
       } else {                // unknown → pass both bytes through
         Serial.write(0x7E);
         Serial.write(b);
+        txBytes += 2;
       }
       continue;
     }
@@ -84,11 +125,13 @@ void loop() {
       escPending = true;
     } else {
       Serial.write(b);
+      txBytes++;
     }
   }
 
   // Serial → TCP
   while (Serial.available()) {
     client.write((uint8_t)Serial.read());
+    rxBytes++;
   }
 }
